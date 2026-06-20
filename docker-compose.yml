@@ -1,0 +1,39 @@
+# Local convenience for running the backend in Docker.
+#   Production-style image:  docker compose up --build
+#   Hot-reload dev mode:     docker compose --profile dev up
+services:
+  api:
+    build:
+      context: .
+      target: runner
+    image: studyai-companion-be
+    ports:
+      - '4000:4000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+    restart: unless-stopped
+
+  # Optional hot-reload service (tsx watch). Source is bind-mounted; node_modules
+  # stays in the container. Start with: docker compose --profile dev up
+  api-dev:
+    profiles:
+      - dev
+    build:
+      context: .
+      target: deps
+    image: studyai-companion-be-dev
+    command: pnpm dev
+    working_dir: /app
+    ports:
+      - '4000:4000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+    volumes:
+      - ./src:/app/src
+      - ./tsconfig.json:/app/tsconfig.json

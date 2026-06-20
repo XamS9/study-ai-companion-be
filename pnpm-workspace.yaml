@@ -1,0 +1,4 @@
+# pnpm build-script approvals (pnpm v10+ reads these here, not package.json).
+# esbuild ships a prebuilt binary used by tsx; allow its install script.
+allowBuilds:
+  esbuild: true

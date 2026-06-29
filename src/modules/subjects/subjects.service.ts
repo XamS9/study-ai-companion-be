@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from '../../lib/supabase.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '../../middleware/error.js';
 import { mapExam, type ExamDTO } from '../exams/exams.service.js';
 import { mapMaterial, type MaterialDTO } from '../materials/materials.service.js';
@@ -47,8 +47,8 @@ function mapSubject(row: SubjectRow): SubjectDTO {
 
 const SELECT_WITH_COUNTS = '*, materials(count), exams(count)';
 
-export async function listSubjects(userId: string): Promise<SubjectDTO[]> {
-  const { data, error } = await getSupabaseAdmin()
+export async function listSubjects(db: SupabaseClient, userId: string): Promise<SubjectDTO[]> {
+  const { data, error } = await db
     .from('subjects')
     .select(SELECT_WITH_COUNTS)
     .eq('user_id', userId)
@@ -57,8 +57,12 @@ export async function listSubjects(userId: string): Promise<SubjectDTO[]> {
   return (data as SubjectRow[]).map(mapSubject);
 }
 
-export async function getSubjectRow(userId: string, id: string): Promise<SubjectDTO> {
-  const { data, error } = await getSupabaseAdmin()
+export async function getSubjectRow(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<SubjectDTO> {
+  const { data, error } = await db
     .from('subjects')
     .select(SELECT_WITH_COUNTS)
     .eq('user_id', userId)
@@ -74,9 +78,12 @@ export type SubjectDetailDTO = SubjectDTO & {
   exams: ExamDTO[];
 };
 
-export async function getSubjectDetail(userId: string, id: string): Promise<SubjectDetailDTO> {
-  const subject = await getSubjectRow(userId, id);
-  const db = getSupabaseAdmin();
+export async function getSubjectDetail(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<SubjectDetailDTO> {
+  const subject = await getSubjectRow(db, userId, id);
   const [materials, exams] = await Promise.all([
     db
       .from('materials')
@@ -101,10 +108,11 @@ export async function getSubjectDetail(userId: string, id: string): Promise<Subj
 }
 
 export async function createSubject(
+  db: SupabaseClient,
   userId: string,
   input: CreateSubjectInput,
 ): Promise<SubjectDTO> {
-  const { data, error } = await getSupabaseAdmin()
+  const { data, error } = await db
     .from('subjects')
     .insert({
       user_id: userId,
@@ -121,6 +129,7 @@ export async function createSubject(
 }
 
 export async function updateSubject(
+  db: SupabaseClient,
   userId: string,
   id: string,
   input: UpdateSubjectInput,
@@ -132,7 +141,7 @@ export async function updateSubject(
   if (input.color !== undefined) patch.color = input.color;
   if (input.progress !== undefined) patch.progress = input.progress;
 
-  const { data, error } = await getSupabaseAdmin()
+  const { data, error } = await db
     .from('subjects')
     .update(patch)
     .eq('user_id', userId)
@@ -144,8 +153,64 @@ export async function updateSubject(
   return mapSubject(data as SubjectRow);
 }
 
-export async function deleteSubject(userId: string, id: string): Promise<void> {
-  const { error, count } = await getSupabaseAdmin()
+export type QuestionDTO = {
+  id: string;
+  subjectId: string;
+  materialId: string | null;
+  prompt: string;
+  type: string;
+  options: string[];
+  correctAnswer: string;
+  createdAt: string;
+};
+
+type QuestionRow = {
+  id: string;
+  subject_id: string;
+  material_id: string | null;
+  prompt: string;
+  type: string;
+  options: string[] | null;
+  correct_answer: string;
+  created_at: string;
+};
+
+function mapQuestion(row: QuestionRow): QuestionDTO {
+  return {
+    id: row.id,
+    subjectId: row.subject_id,
+    materialId: row.material_id,
+    prompt: row.prompt,
+    type: row.type,
+    options: row.options ?? [],
+    correctAnswer: row.correct_answer,
+    createdAt: row.created_at,
+  };
+}
+
+/** The subject's reusable question bank (the pool exams draw from). */
+export async function listQuestions(
+  db: SupabaseClient,
+  userId: string,
+  subjectId: string,
+): Promise<QuestionDTO[]> {
+  await getSubjectRow(db, userId, subjectId); // ownership / existence check
+  const { data, error } = await db
+    .from('questions')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('subject_id', subjectId)
+    .order('created_at', { ascending: false });
+  if (error) throw new AppError(500, error.message);
+  return (data as QuestionRow[]).map(mapQuestion);
+}
+
+export async function deleteSubject(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<void> {
+  const { error, count } = await db
     .from('subjects')
     .delete({ count: 'exact' })
     .eq('user_id', userId)

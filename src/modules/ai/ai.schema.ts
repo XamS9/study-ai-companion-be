@@ -40,7 +40,12 @@ export const processMaterialSchema = z.object({
   flashcardCount: z.number().int().min(1).max(30).default(8),
 });
 
+export const regenerateQuestionsSchema = z.object({
+  count: z.number().int().min(1).max(20).default(10),
+});
+
 export type GenerateQuestionsInput = z.infer<typeof generateQuestionsSchema>;
 export type SummarizeInput = z.infer<typeof summarizeSchema>;
 export type GenerateFlashcardsInput = z.infer<typeof generateFlashcardsSchema>;
 export type ProcessMaterialInput = z.infer<typeof processMaterialSchema>;
+export type RegenerateQuestionsInput = z.infer<typeof regenerateQuestionsSchema>;

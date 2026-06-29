@@ -1,6 +1,6 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { getOpenAI, OPENAI_MODEL } from '../../lib/openai.js';
-import { getSupabaseAdmin } from '../../lib/supabase.js';
 import { AppError } from '../../middleware/error.js';
 import { examQuestionInputSchema, type ExamQuestionInput } from '../exams/exams.schema.js';
 import { getMaterial } from '../materials/materials.service.js';
@@ -13,8 +13,12 @@ import type {
 
 export type Flashcard = { front: string; back: string };
 
-async function assertSubjectOwned(userId: string, subjectId: string): Promise<void> {
-  const { data, error } = await getSupabaseAdmin()
+async function assertSubjectOwned(
+  db: SupabaseClient,
+  userId: string,
+  subjectId: string,
+): Promise<void> {
+  const { data, error } = await db
     .from('subjects')
     .select('id')
     .eq('user_id', userId)
@@ -26,13 +30,14 @@ async function assertSubjectOwned(userId: string, subjectId: string): Promise<vo
 
 /** Resolves source text from an explicit string or a stored material's content. */
 async function resolveText(
+  db: SupabaseClient,
   userId: string,
   materialId: string | undefined,
   text: string | undefined,
 ): Promise<string> {
   if (text && text.trim()) return text;
   if (materialId) {
-    const material = await getMaterial(userId, materialId);
+    const material = await getMaterial(db, userId, materialId);
     if (material.content && material.content.trim()) return material.content;
   }
   throw new AppError(422, 'No source text available to process');
@@ -40,16 +45,15 @@ async function resolveText(
 
 const questionsResponseSchema = z.object({ questions: z.array(examQuestionInputSchema) });
 
-export async function generateQuestions(
-  userId: string,
-  input: GenerateQuestionsInput,
+/** Source text longer than this is truncated before being sent to the model. */
+const MAX_SOURCE_CHARS = 100_000;
+
+/** Runs the question-generation model over `source` and returns up to `count` validated questions. */
+async function callQuestionModel(
+  openai: NonNullable<ReturnType<typeof getOpenAI>>,
+  source: string,
+  count: number,
 ): Promise<ExamQuestionInput[]> {
-  const openai = getOpenAI();
-  if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
-
-  await assertSubjectOwned(userId, input.subjectId);
-  const source = await resolveText(userId, input.materialId, input.sourceText);
-
   const completion = await openai.chat.completions.create({
     model: OPENAI_MODEL,
     temperature: 0.4,
@@ -62,11 +66,13 @@ export async function generateQuestions(
           'of the form {"questions":[{"prompt":string,"type":"multiple_choice"|"true_false",' +
           '"options":string[],"correctAnswer":string}]}. For multiple_choice include 4 options ' +
           'and set correctAnswer to one of them. For true_false use options ["True","False"] ' +
-          'and correctAnswer "True" or "False". Write questions in the same language as the source.',
+          'and correctAnswer "True" or "False"; phrase the prompt as a plain declarative ' +
+          'statement and do NOT prefix it with "True or False:" or similar (the UI already ' +
+          'labels it). Write questions in the same language as the source.',
       },
       {
         role: 'user',
-        content: `Generate ${input.count} questions from this material:\n\n${source}`,
+        content: `Generate ${count} questions from this material:\n\n${source}`,
       },
     ],
   });
@@ -82,7 +88,20 @@ export async function generateQuestions(
   }
   const result = questionsResponseSchema.safeParse(parsed);
   if (!result.success) throw new AppError(502, 'AI response did not match the expected shape');
-  const questions = result.data.questions.slice(0, input.count);
+  return result.data.questions.slice(0, count);
+}
+
+export async function generateQuestions(
+  db: SupabaseClient,
+  userId: string,
+  input: GenerateQuestionsInput,
+): Promise<ExamQuestionInput[]> {
+  const openai = getOpenAI();
+  if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
+
+  await assertSubjectOwned(db, userId, input.subjectId);
+  const source = await resolveText(db, userId, input.materialId, input.sourceText);
+  const questions = await callQuestionModel(openai, source, input.count);
 
   if (input.persist && questions.length > 0) {
     const rows = questions.map((q) => ({
@@ -94,21 +113,87 @@ export async function generateQuestions(
       options: q.options,
       correct_answer: q.correctAnswer,
     }));
-    const { error } = await getSupabaseAdmin().from('questions').insert(rows);
+    const { error } = await db.from('questions').insert(rows);
     if (error) throw new AppError(500, error.message);
   }
 
   return questions;
 }
 
+/**
+ * Regenerates a subject's question bank: builds source text from the subject's
+ * materials' content, asks the model for a fresh set, then **replaces** the bank
+ * (deletes the subject's existing questions and inserts the new ones). The model is
+ * called before any deletion, so an AI failure leaves the current bank intact.
+ * Throws 422 when the subject has no material text to work from.
+ */
+export async function regenerateSubjectQuestions(
+  db: SupabaseClient,
+  userId: string,
+  subjectId: string,
+  count: number,
+): Promise<ExamQuestionInput[]> {
+  const openai = getOpenAI();
+  if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
+
+  await assertSubjectOwned(db, userId, subjectId);
+
+  const { data: materials, error: matError } = await db
+    .from('materials')
+    .select('content')
+    .eq('user_id', userId)
+    .eq('subject_id', subjectId)
+    .not('content', 'is', null)
+    .order('created_at', { ascending: true });
+  if (matError) throw new AppError(500, matError.message);
+
+  const source = (materials ?? [])
+    .map((m) => (m.content as string | null)?.trim())
+    .filter((c): c is string => !!c)
+    .join('\n\n')
+    .slice(0, MAX_SOURCE_CHARS);
+  if (!source) {
+    throw new AppError(
+      422,
+      'No material content to generate questions from — add a material with text first.',
+    );
+  }
+
+  const questions = await callQuestionModel(openai, source, count);
+  if (questions.length === 0) throw new AppError(502, 'AI returned no questions');
+
+  // Replace the bank. (Past exams keep their own snapshot in exam_questions.)
+  const { error: delError } = await db
+    .from('questions')
+    .delete()
+    .eq('user_id', userId)
+    .eq('subject_id', subjectId);
+  if (delError) throw new AppError(500, delError.message);
+
+  const rows = questions.map((q) => ({
+    user_id: userId,
+    subject_id: subjectId,
+    material_id: null,
+    prompt: q.prompt,
+    type: q.type,
+    options: q.options,
+    correct_answer: q.correctAnswer,
+  }));
+  const { error: insError } = await db.from('questions').insert(rows);
+  if (insError) throw new AppError(500, insError.message);
+
+  return questions;
+}
+
 export async function summarize(
+  db: SupabaseClient,
   userId: string,
   input: SummarizeInput,
 ): Promise<{ summary: string }> {
   const openai = getOpenAI();
   if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
 
-  const source = await resolveText(userId, input.materialId, input.text);
+  const source = await resolveText(db, userId, input.materialId, input.text);
 
   const completion = await openai.chat.completions.create({
     model: OPENAI_MODEL,
@@ -128,7 +213,7 @@ export async function summarize(
   if (!summary) throw new AppError(502, 'AI returned an empty response');
 
   if (input.persist && input.materialId) {
-    const { error } = await getSupabaseAdmin()
+    const { error } = await db
       .from('materials')
       .update({ summary })
       .eq('user_id', userId)
@@ -143,12 +228,12 @@ const flashcardSchema = z.object({ front: z.string().min(1), back: z.string().mi
 const flashcardsResponseSchema = z.object({ flashcards: z.array(flashcardSchema) });
 
 async function persistFlashcards(
+  db: SupabaseClient,
   userId: string,
   subjectId: string,
   materialId: string,
   cards: Flashcard[],
 ): Promise<void> {
-  const db = getSupabaseAdmin();
   // Replace any previous set so re-generating doesn't duplicate.
   const { error: delError } = await db
     .from('flashcards')
@@ -169,14 +254,15 @@ async function persistFlashcards(
 }
 
 export async function generateFlashcards(
+  db: SupabaseClient,
   userId: string,
   input: GenerateFlashcardsInput,
 ): Promise<Flashcard[]> {
   const openai = getOpenAI();
   if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
 
-  await assertSubjectOwned(userId, input.subjectId);
-  const source = await resolveText(userId, input.materialId, input.sourceText);
+  await assertSubjectOwned(db, userId, input.subjectId);
+  const source = await resolveText(db, userId, input.materialId, input.sourceText);
 
   const completion = await openai.chat.completions.create({
     model: OPENAI_MODEL,
@@ -207,7 +293,7 @@ export async function generateFlashcards(
   const flashcards = result.data.flashcards.slice(0, input.count);
 
   if (input.persist && input.materialId) {
-    await persistFlashcards(userId, input.subjectId, input.materialId, flashcards);
+    await persistFlashcards(db, userId, input.subjectId, input.materialId, flashcards);
   }
   return flashcards;
 }
@@ -227,13 +313,14 @@ export type ProcessMaterialResult = {
 
 /** One-shot "AI processing": summary + key concepts + flashcards + question bank. */
 export async function processMaterial(
+  db: SupabaseClient,
   userId: string,
   input: ProcessMaterialInput,
 ): Promise<ProcessMaterialResult> {
   const openai = getOpenAI();
   if (!openai) throw new AppError(503, 'AI is not configured (missing OPENAI_API_KEY)');
 
-  const material = await getMaterial(userId, input.materialId);
+  const material = await getMaterial(db, userId, input.materialId);
   const source = material.content?.trim();
   if (!source) throw new AppError(422, 'Material has no content to process');
 
@@ -267,16 +354,16 @@ export async function processMaterial(
   const { summary, keyConcepts } = result.data;
   const flashcards = result.data.flashcards.slice(0, input.flashcardCount);
 
-  const { error: updateError } = await getSupabaseAdmin()
+  const { error: updateError } = await db
     .from('materials')
     .update({ summary, key_concepts: keyConcepts })
     .eq('user_id', userId)
     .eq('id', material.id);
   if (updateError) throw new AppError(500, updateError.message);
 
-  await persistFlashcards(userId, material.subjectId, material.id, flashcards);
+  await persistFlashcards(db, userId, material.subjectId, material.id, flashcards);
 
-  const questions = await generateQuestions(userId, {
+  const questions = await generateQuestions(db, userId, {
     subjectId: material.subjectId,
     materialId: material.id,
     count: input.questionCount,

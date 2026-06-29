@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from '../../lib/supabase.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '../../middleware/error.js';
 import type { CreateExamInput, ExamQuestionInput, SubmitExamInput } from './exams.schema.js';
 
@@ -80,8 +80,12 @@ function mapExamQuestion(row: ExamQuestionRow): ExamQuestionDTO {
   };
 }
 
-async function assertSubjectOwned(userId: string, subjectId: string): Promise<void> {
-  const { data, error } = await getSupabaseAdmin()
+async function assertSubjectOwned(
+  db: SupabaseClient,
+  userId: string,
+  subjectId: string,
+): Promise<void> {
+  const { data, error } = await db
     .from('subjects')
     .select('id')
     .eq('user_id', userId)
@@ -91,8 +95,8 @@ async function assertSubjectOwned(userId: string, subjectId: string): Promise<vo
   if (!data) throw new AppError(404, 'Subject not found');
 }
 
-export async function listExams(userId: string): Promise<ExamDTO[]> {
-  const { data, error } = await getSupabaseAdmin()
+export async function listExams(db: SupabaseClient, userId: string): Promise<ExamDTO[]> {
+  const { data, error } = await db
     .from('exams')
     .select('*')
     .eq('user_id', userId)
@@ -101,8 +105,8 @@ export async function listExams(userId: string): Promise<ExamDTO[]> {
   return (data as ExamRow[]).map(mapExam);
 }
 
-async function loadExamRow(userId: string, id: string): Promise<ExamRow> {
-  const { data, error } = await getSupabaseAdmin()
+async function loadExamRow(db: SupabaseClient, userId: string, id: string): Promise<ExamRow> {
+  const { data, error } = await db
     .from('exams')
     .select('*')
     .eq('user_id', userId)
@@ -113,8 +117,8 @@ async function loadExamRow(userId: string, id: string): Promise<ExamRow> {
   return data as ExamRow;
 }
 
-async function loadExamQuestions(examId: string): Promise<ExamQuestionRow[]> {
-  const { data, error } = await getSupabaseAdmin()
+async function loadExamQuestions(db: SupabaseClient, examId: string): Promise<ExamQuestionRow[]> {
+  const { data, error } = await db
     .from('exam_questions')
     .select('*')
     .eq('exam_id', examId)
@@ -123,19 +127,24 @@ async function loadExamQuestions(examId: string): Promise<ExamQuestionRow[]> {
   return data as ExamQuestionRow[];
 }
 
-export async function getExamDetail(userId: string, id: string): Promise<ExamDetailDTO> {
-  const exam = await loadExamRow(userId, id);
-  const questions = await loadExamQuestions(id);
+export async function getExamDetail(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<ExamDetailDTO> {
+  const exam = await loadExamRow(db, userId, id);
+  const questions = await loadExamQuestions(db, id);
   return { ...mapExam(exam), questions: questions.map(mapExamQuestion) };
 }
 
 /** Pulls up to `count` questions from the subject's bank in random order. */
 async function pickFromBank(
+  db: SupabaseClient,
   userId: string,
   subjectId: string,
   count: number,
 ): Promise<ExamQuestionInput[]> {
-  const { data, error } = await getSupabaseAdmin()
+  const { data, error } = await db
     .from('questions')
     .select('prompt, type, options, correct_answer')
     .eq('user_id', userId)
@@ -150,13 +159,17 @@ async function pickFromBank(
   }));
 }
 
-export async function createExam(userId: string, input: CreateExamInput): Promise<ExamDetailDTO> {
-  await assertSubjectOwned(userId, input.subjectId);
+export async function createExam(
+  db: SupabaseClient,
+  userId: string,
+  input: CreateExamInput,
+): Promise<ExamDetailDTO> {
+  await assertSubjectOwned(db, userId, input.subjectId);
 
   const questions =
     input.questions && input.questions.length > 0
       ? input.questions
-      : await pickFromBank(userId, input.subjectId, input.questionCount);
+      : await pickFromBank(db, userId, input.subjectId, input.questionCount);
 
   if (questions.length === 0) {
     throw new AppError(
@@ -165,7 +178,6 @@ export async function createExam(userId: string, input: CreateExamInput): Promis
     );
   }
 
-  const db = getSupabaseAdmin();
   const { data: exam, error: examError } = await db
     .from('exams')
     .insert({
@@ -190,21 +202,21 @@ export async function createExam(userId: string, input: CreateExamInput): Promis
   const { error: qError } = await db.from('exam_questions').insert(rows);
   if (qError) throw new AppError(500, qError.message);
 
-  return getExamDetail(userId, (exam as ExamRow).id);
+  return getExamDetail(db, userId, (exam as ExamRow).id);
 }
 
 const normalize = (s: string) => s.trim().toLowerCase();
 
 export async function submitExam(
+  db: SupabaseClient,
   userId: string,
   id: string,
   input: SubmitExamInput,
 ): Promise<ExamDetailDTO> {
-  await loadExamRow(userId, id); // ownership check
-  const questions = await loadExamQuestions(id);
+  await loadExamRow(db, userId, id); // ownership check
+  const questions = await loadExamQuestions(db, id);
   const answerById = new Map(input.answers.map((a) => [a.examQuestionId, a.answer]));
 
-  const db = getSupabaseAdmin();
   let correct = 0;
   for (const q of questions) {
     const given = answerById.get(q.id);
@@ -231,11 +243,11 @@ export async function submitExam(
     .eq('id', id);
   if (updateError) throw new AppError(500, updateError.message);
 
-  return getExamDetail(userId, id);
+  return getExamDetail(db, userId, id);
 }
 
-export async function deleteExam(userId: string, id: string): Promise<void> {
-  const { error, count } = await getSupabaseAdmin()
+export async function deleteExam(db: SupabaseClient, userId: string, id: string): Promise<void> {
+  const { error, count } = await db
     .from('exams')
     .delete({ count: 'exact' })
     .eq('user_id', userId)

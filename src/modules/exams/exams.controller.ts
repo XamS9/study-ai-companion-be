@@ -9,24 +9,24 @@ import {
 } from './exams.service.js';
 
 export const list: RequestHandler = async (req, res) => {
-  res.json(await listExams(req.userId!));
+  res.json(await listExams(req.db!, req.userId!));
 };
 
 export const detail: RequestHandler<{ id: string }> = async (req, res) => {
-  res.json(await getExamDetail(req.userId!, req.params.id));
+  res.json(await getExamDetail(req.db!, req.userId!, req.params.id));
 };
 
 export const create: RequestHandler = async (req, res) => {
   const input = createExamSchema.parse(req.body);
-  res.status(201).json(await createExam(req.userId!, input));
+  res.status(201).json(await createExam(req.db!, req.userId!, input));
 };
 
 export const submit: RequestHandler<{ id: string }> = async (req, res) => {
   const input = submitExamSchema.parse(req.body);
-  res.json(await submitExam(req.userId!, req.params.id, input));
+  res.json(await submitExam(req.db!, req.userId!, req.params.id, input));
 };
 
 export const remove: RequestHandler<{ id: string }> = async (req, res) => {
-  await deleteExam(req.userId!, req.params.id);
+  await deleteExam(req.db!, req.userId!, req.params.id);
   res.status(204).end();
 };

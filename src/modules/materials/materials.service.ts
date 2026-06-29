@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from '../../lib/supabase.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '../../middleware/error.js';
 import type { CreateMaterialInput, UpdateMaterialInput } from './materials.schema.js';
 
@@ -52,8 +52,12 @@ export function mapMaterial(row: MaterialRow): MaterialDTO {
   };
 }
 
-export async function getFlashcards(userId: string, materialId: string): Promise<FlashcardDTO[]> {
-  const { data, error } = await getSupabaseAdmin()
+export async function getFlashcards(
+  db: SupabaseClient,
+  userId: string,
+  materialId: string,
+): Promise<FlashcardDTO[]> {
+  const { data, error } = await db
     .from('flashcards')
     .select('id, front, back')
     .eq('user_id', userId)
@@ -64,8 +68,12 @@ export async function getFlashcards(userId: string, materialId: string): Promise
 }
 
 /** Confirms the subject exists and belongs to the user (FK guard for inserts). */
-async function assertSubjectOwned(userId: string, subjectId: string): Promise<void> {
-  const { data, error } = await getSupabaseAdmin()
+async function assertSubjectOwned(
+  db: SupabaseClient,
+  userId: string,
+  subjectId: string,
+): Promise<void> {
+  const { data, error } = await db
     .from('subjects')
     .select('id')
     .eq('user_id', userId)
@@ -75,8 +83,12 @@ async function assertSubjectOwned(userId: string, subjectId: string): Promise<vo
   if (!data) throw new AppError(404, 'Subject not found');
 }
 
-export async function listMaterials(userId: string, subjectId?: string): Promise<MaterialDTO[]> {
-  let query = getSupabaseAdmin()
+export async function listMaterials(
+  db: SupabaseClient,
+  userId: string,
+  subjectId?: string,
+): Promise<MaterialDTO[]> {
+  let query = db
     .from('materials')
     .select('*')
     .eq('user_id', userId)
@@ -87,8 +99,12 @@ export async function listMaterials(userId: string, subjectId?: string): Promise
   return (data as MaterialRow[]).map(mapMaterial);
 }
 
-export async function getMaterial(userId: string, id: string): Promise<MaterialDTO> {
-  const { data, error } = await getSupabaseAdmin()
+export async function getMaterial(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<MaterialDTO> {
+  const { data, error } = await db
     .from('materials')
     .select('*')
     .eq('user_id', userId)
@@ -100,11 +116,12 @@ export async function getMaterial(userId: string, id: string): Promise<MaterialD
 }
 
 export async function createMaterial(
+  db: SupabaseClient,
   userId: string,
   input: CreateMaterialInput,
 ): Promise<MaterialDTO> {
-  await assertSubjectOwned(userId, input.subjectId);
-  const { data, error } = await getSupabaseAdmin()
+  await assertSubjectOwned(db, userId, input.subjectId);
+  const { data, error } = await db
     .from('materials')
     .insert({
       user_id: userId,
@@ -122,6 +139,7 @@ export async function createMaterial(
 }
 
 export async function updateMaterial(
+  db: SupabaseClient,
   userId: string,
   id: string,
   input: UpdateMaterialInput,
@@ -134,7 +152,7 @@ export async function updateMaterial(
   if (input.summary !== undefined) patch.summary = input.summary;
   if (input.fileUrl !== undefined) patch.file_url = input.fileUrl;
 
-  const { data, error } = await getSupabaseAdmin()
+  const { data, error } = await db
     .from('materials')
     .update(patch)
     .eq('user_id', userId)
@@ -146,8 +164,12 @@ export async function updateMaterial(
   return mapMaterial(data as MaterialRow);
 }
 
-export async function deleteMaterial(userId: string, id: string): Promise<void> {
-  const { error, count } = await getSupabaseAdmin()
+export async function deleteMaterial(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<void> {
+  const { error, count } = await db
     .from('materials')
     .delete({ count: 'exact' })
     .eq('user_id', userId)

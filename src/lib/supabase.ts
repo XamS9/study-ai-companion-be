@@ -2,24 +2,47 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../config/env.js';
 
 /**
- * Server-side Supabase client using the **service-role key**. It bypasses RLS, so
- * every query in the services layer must scope rows by the authenticated user id
- * (taken from the validated JWT). Never expose this client or its key to the app.
+ * Two server-side Supabase clients with a deliberate separation of concerns:
  *
- * Created lazily so the skeleton still boots without credentials; the first call
- * fails loudly if the env vars are missing.
+ * - `createUserClient(token)` — the **default** for feature services. It carries the
+ *   caller's access token, so every query runs under their identity and Postgres
+ *   **RLS (`auth.uid()`) enforces row ownership**. Created fresh per request.
+ * - `getSupabaseAdmin()` — the service-role client that **bypasses RLS**. Reserve it
+ *   for work that genuinely must cross the per-user boundary: JWT verification,
+ *   cron jobs in `src/jobs/`, and future cross-user / admin / webhook tasks. Never
+ *   expose this client or its key to the app.
+ *
+ * Rule of thumb: reach for `req.db` (the user client). Escalate to the admin client
+ * only with a specific, reviewable reason.
  */
-let client: SupabaseClient | null = null;
+let admin: SupabaseClient | null = null;
 
 export function getSupabaseAdmin(): SupabaseClient {
-  if (client) return client;
+  if (admin) return admin;
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error(
-      'Supabase is not configured: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.',
+      'Supabase admin is not configured: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment.',
     );
   }
-  client = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+  admin = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  return client;
+  return admin;
+}
+
+/**
+ * Per-request, RLS-enforced client bound to the caller's Supabase access token.
+ * `requireAuth` attaches the result as `req.db`. Do not cache it — the token is
+ * request-scoped.
+ */
+export function createUserClient(accessToken: string): SupabaseClient {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    throw new Error(
+      'Supabase is not configured: set SUPABASE_URL and SUPABASE_ANON_KEY in the environment.',
+    );
+  }
+  return createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 }

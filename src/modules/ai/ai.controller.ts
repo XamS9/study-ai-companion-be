@@ -9,20 +9,20 @@ import { generateFlashcards, generateQuestions, processMaterial, summarize } fro
 
 export const questions: RequestHandler = async (req, res) => {
   const input = generateQuestionsSchema.parse(req.body);
-  res.json({ questions: await generateQuestions(req.userId!, input) });
+  res.json({ questions: await generateQuestions(req.db!, req.userId!, input) });
 };
 
 export const summary: RequestHandler = async (req, res) => {
   const input = summarizeSchema.parse(req.body);
-  res.json(await summarize(req.userId!, input));
+  res.json(await summarize(req.db!, req.userId!, input));
 };
 
 export const flashcards: RequestHandler = async (req, res) => {
   const input = generateFlashcardsSchema.parse(req.body);
-  res.json({ flashcards: await generateFlashcards(req.userId!, input) });
+  res.json({ flashcards: await generateFlashcards(req.db!, req.userId!, input) });
 };
 
 export const process: RequestHandler = async (req, res) => {
   const input = processMaterialSchema.parse(req.body);
-  res.json(await processMaterial(req.userId!, input));
+  res.json(await processMaterial(req.db!, req.userId!, input));
 };
